@@ -39,7 +39,7 @@ class WeightCalculator(
     calcWordWeights(words, wordsColumn)
   }
 
-  protected def readDocuments(docsDirPath: String): DataFrame = {
+  protected def readDocuments(docsDirPath: String): Seq[RichDoc] = {
     val docsDir = new File(docsDirPath)
     if (!docsDir.isDirectory) {
       throw new IllegalArgumentException(s"Not a directory: $docsDirPath")
@@ -47,32 +47,33 @@ class WeightCalculator(
 
     val docFiles = docsDir.listFiles()
       .filter(_.isFile)
+      .toSeq
     if (docFiles.isEmpty) {
       throw new IllegalArgumentException(s"None files found in the directory: $docsDirPath")
     }
 
     docFiles.map { docFile =>
-      (docFile.getName, docFile.getAbsolutePath, Source.fromFile(docFile).mkString)
+      val source = Source.fromFile(docFile)
+      val rawText = try {
+        source.mkString
+      } finally {
+        source.close()
+      }
+      RichDoc(docFile.getName, docFile.getAbsolutePath, rawText)
     }
-      .toSeq
-      .toDF(config.docNameColumn, config.docPathColumn, config.rawTextColumn)
   }
 
-  protected def prepareWords(rawText: DataFrame, wordsColumn: String): DataFrame = {
-    val noAbbrColumn = "no_abbr"
-    val noAbbrText = removeAbbreviations(rawText, noAbbrColumn)
+  protected def prepareWords(rawDocs: Seq[RichDoc]): Seq[RichDoc] = {
+    val noAbbrDocs = removeAbbreviations(rawDocs)
 
-    val noPunctColumn = "no_punct"
-    val noPunctText = noAbbrText
-      .withColumn(noPunctColumn,
-        regexp_replace(col(noAbbrColumn), """[\p{Punct}]""", ""))
+    val noPunctDocs = removePunctuation(noAbbrDocs)
 
     val rawWordsColumn = "raw_words"
     val tokenizer: RegexTokenizer = new RegexTokenizer()
       .setInputCol(noPunctColumn)
       .setOutputCol(rawWordsColumn)
       .setToLowercase(true)
-    val rawWords = tokenizer.transform(noPunctText)
+    val rawWords = tokenizer.transform(noPunctDocs)
       .where(size(col(rawWordsColumn)) > 0)
 
     val stopWordsRemover = new StopWordsRemover()
@@ -82,11 +83,14 @@ class WeightCalculator(
     stopWordsRemover.transform(rawWords)
   }
 
-  protected def removeAbbreviations(rawText: DataFrame, noAbbrColumn: String): DataFrame = {
-    val zeroDf = rawText.withColumn(noAbbrColumn, col(config.rawTextColumn))
+  protected def removeAbbreviations(inputDocs: Seq[RichDoc]): Seq[RichDoc] = {
+    //TODO Process in parallel
     getAbbreviations
-      .foldLeft(zeroDf) { (df, abbr) =>
-        df.withColumn(noAbbrColumn, regexp_replace(col(noAbbrColumn), abbr, ""))
+      .foldLeft(inputDocs) { (docs, abbr) =>
+        docs.map { doc =>
+          //TODO Precompile regex
+          RichDoc(doc.name, doc.path, doc.text.replaceAll(abbr, ""))
+        }
       }
   }
 
@@ -101,9 +105,24 @@ class WeightCalculator(
       """(?i)\w+'t"""
     )
 
-  protected def getStopWords: Array[String] =
-    StopWordsRemover.loadDefaultStopWords("english") ++
-      Seq("till", "since")
+  protected def removePunctuation(inputDocs: Seq[RichDoc]): Seq[RichDoc] = {
+    //TODO Process in parallel
+    inputDocs.map { doc =>
+      //TODO Precompile regex
+      RichDoc(doc.name, doc.path, doc.text.replaceAll("""[\p{Punct}]""", ""))
+    }
+  }
+
+  protected def getStopWords: Array[String] = {
+    val stopWordsUrl = this.getClass.getResource("english.txt")
+    val source = Source.fromURL(stopWordsUrl)
+    try {
+      source.getLines()
+        .toArray
+    } finally {
+      source.close()
+    }
+  }
 
   protected def calcWordWeights(words: DataFrame, wordsColumn: String): DataFrame = {
     val tfIdfConfig = TfIdfConfig(documentColumn = wordsColumn)
@@ -122,6 +141,8 @@ class WeightCalculator(
   }
 
 }
+
+case class RichDoc(name: String, path: String, text: String)
 
 case class WeightCalculatorConfig(
                          rawTextColumn: String = "raw_text",
