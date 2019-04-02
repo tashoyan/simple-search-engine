@@ -70,3 +70,5 @@ assemblyMergeStrategy in assembly := { // this is the default plus one more for 
 
   case _ => MergeStrategy.deduplicate
 }
+
+mainClass in assembly := Some("com.github.tashoyan.engine.Main")
